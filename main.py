@@ -11,7 +11,9 @@ number_packet_in_com = 0
 all_packet_number = 0
 keep_alive_time = 5
 packet_number_to_simulate_error = 0
+last_packet = -1
 is_sending = False
+client_info = ('192.168.1.15', 5000)
 
 
 def put_together(packet):
@@ -31,6 +33,7 @@ def reconstruction_file_from_bytes():
     last_packet = -1
     for packet in all_packets:
         if packet[2] == last_packet:
+            print("mas tu 2 rovnake bajty")
             continue
         else:
             file2.write(packet[3])  # 3 because it's fourth part in packet and i need data
@@ -46,6 +49,7 @@ def reconstruction_message_from_bytes():
     last_packet = -1
     for packet in all_packets:
         if packet[2] == last_packet:
+            print("mas tu 2 rovnake bajty")
             continue
         else:
             print('prijate packety', packet[3])
@@ -62,21 +66,16 @@ def control_crc(packet) -> int:
 
 
 def analyze_packet(packet, s_socket):
-    global number_packet_in_com, all_packet_number, packet_number_to_simulate_error
+    global number_packet_in_com, all_packet_number, packet_number_to_simulate_error, is_sending, last_packet
     type_of_packet = packet[0:1].decode('ascii')
+
+    is_sending = True
 
     if type_of_packet == 'I':
         s_socket.settimeout(15)
         print('Spojenie bolo inicializovane')
         init_packet = pack('!c', 'I'.encode('ascii'))
-        s_socket.sendto(init_packet, ('192.168.1.15', 5000))
-
-    # elif type_of_packet == 'P':
-    #     s_socket.settimeout(15)
-    #     print('Je to porno')
-    #     print('oh Gott, schneller')
-    #     print(packet[1:])
-    #     return False
+        s_socket.sendto(init_packet, client_info)
 
     elif type_of_packet == 'M' or type_of_packet == 'P':
         s_socket.settimeout(15)
@@ -88,47 +87,53 @@ def analyze_packet(packet, s_socket):
             if control_crc(packet) != 0:
                 print('chyba je v ', number_packet_in_com)
                 error_message = pack('!c', 'E'.encode('ascii'))
-                s_socket.sendto(error_message, ('192.168.1.15', 5000))
+                s_socket.sendto(error_message, client_info)
                 return True
             else:
-                put_together(packet)
+                if int.from_bytes(packet[3:5], byteorder='big') != last_packet:
+                    last_packet += 1
+                    put_together(packet)
+                else:
+                    print('prisiel znova packet')
+                    all_packet_number += 1
 
         # this block run if all packets were sent
         if number_packet_in_com == all_packet_number:
+            is_sending = False
             print("Prebehlo poslanie jedneho suboru", number_packet_in_com)
 
             right_packet = pack('!c', 'O'.encode('ascii'))
-            s_socket.sendto(right_packet, ('192.168.1.15', 5000))
+            s_socket.sendto(right_packet, client_info)
 
-            right_packet = pack('!c', 'O'.encode('ascii'))
-            s_socket.sendto(right_packet, ('192.168.1.15', 5000))
             if type_of_packet == 'M':
                 reconstruction_file_from_bytes()
             elif type_of_packet == 'P':
                 reconstruction_message_from_bytes()
             number_packet_in_com = 0
+            all_packet_number = 0
+            last_packet = -1
             return False
 
         number_packet_in_com += 1
         # packet is right
 
         # simulating error, that acknowledgment was lost
+
         if number_packet_in_com == 3:
             print("neposielam ACK")
             return True
 
         right_packet = pack('!c', 'O'.encode('ascii'))
-        s_socket.sendto(right_packet, ('192.168.1.15', 5000))
+        s_socket.sendto(right_packet, client_info)
 
     elif type_of_packet == 'K':
+        print('prislo keeepalive')
         s_socket.settimeout(15)
 
     return True
 
 
 def server_listen(s_socket):
-    error_mising_packet = 3
-    counter_to_make_error = 0
     login = True
     while login:
         try:
@@ -136,22 +141,11 @@ def server_listen(s_socket):
             packet, address = s_socket.recvfrom(1500)
             type_of_packet = packet[0:1].decode('ascii')
 
-            #simulating thath packet is lost
-            # if error_mising_packet == counter_to_make_error:
-            #     continue
-
             if is_sending == True and type_of_packet == 'K':
                 pass
             else:
                 login = analyze_packet(packet, s_socket)
-                counter_to_make_error += 1
-        except TimeoutError:
-            s_socket.settimeout(15)
-            if is_sending:
-                error_message = pack('!c', 'E'.encode('ascii'))
-                s_socket.sendto(error_message, ('192.168.1.15', 5000))
-                print('Reku, bol tu strateny packet')
-                continue
+        except socket.timeout:
             print('Skoncil server')
             return
 
@@ -161,7 +155,7 @@ def server_listen(s_socket):
 # function to create socket and send first packet to initialize com
 def client_init():
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    ip_address = '192.168.1.15'
+    ip_address = input("Zadaj Ip servera")
     port = int(input("Zadaj port servera: "))
     client_port = 5000
     client_socket.bind(('', client_port))
@@ -196,7 +190,6 @@ def send_to_server(type_of_packet, send_info, add_error):
         message = message.encode()
         fragment_count = (len(message) // fragment_size) + 1
 
-
         star_of_fragment = 0
         end_of_fragment = fragment_size
 
@@ -211,19 +204,20 @@ def send_to_server(type_of_packet, send_info, add_error):
             if len(data) <= fragment_size:
                 fragment_size = len(data)
 
-            print('posielane packety', data)
             header = 'P'.encode() + pack('!h', fragment_size) + pack('!h', fragment_number)
             data = header + data
             data = create_crc(data)
 
-            # add error
-            if fragment_number == 3 and add_error == 1:
-                data = bytearray(data)
-                corrupted_data = copy.deepcopy(data)
-                corrupted_data[2] = data[2] + 1
-                send_info[0].sendto(corrupted_data, (send_info[1], send_info[2]))
-            else:
-                send_info[0].sendto(data, (send_info[1], send_info[2]))
+            # simulating error that one packet is lost
+            if fragment_number != 3:
+                # add error - data is corupted
+                if fragment_number == 3 and add_error == 1:
+                    data = bytearray(data)
+                    corrupted_data = copy.deepcopy(data)
+                    corrupted_data[2] = data[2] + 1
+                    send_info[0].sendto(corrupted_data, (send_info[1], send_info[2]))
+                else:
+                    send_info[0].sendto(data, (send_info[1], send_info[2]))
 
             # waiting if packet is alright
             while True:
@@ -250,13 +244,11 @@ def send_to_server(type_of_packet, send_info, add_error):
             star_of_fragment += fragment_size
             end_of_fragment += fragment_size
 
-
     elif type_of_packet == 'M':
 
         file = open('img.jpeg', 'rb')
         fragment_count = (os.path.getsize(
             'img.jpeg') // fragment_size) + 1  # add +1, because // round down, you need has more space
-        print(fragment_count)
 
         # send first packet with information about file and whole sending
         header = 'M'.encode() + pack('!h', fragment_size) + pack('!h', fragment_count)
@@ -274,14 +266,16 @@ def send_to_server(type_of_packet, send_info, add_error):
             data = header + file.read(fragment_size)
             data = create_crc(data)
 
-            # add error
-            if fragment_number == 3 and add_error == 1:
-                data = bytearray(data)
-                corrupted_data = copy.deepcopy(data)
-                corrupted_data[2] = data[2] + 1
-                send_info[0].sendto(corrupted_data, (send_info[1], send_info[2]))
-            else:
-                send_info[0].sendto(data, (send_info[1], send_info[2]))
+            # simulating error that one packet is lost
+            if fragment_number != 3:
+                # add error - data is corupted
+                if fragment_number == 3 and add_error == 1:
+                    data = bytearray(data)
+                    corrupted_data = copy.deepcopy(data)
+                    corrupted_data[2] = data[2] + 1
+                    send_info[0].sendto(corrupted_data, (send_info[1], send_info[2]))
+                else:
+                    send_info[0].sendto(data, (send_info[1], send_info[2]))
 
             # waiting if packet is alright
             while True:
@@ -317,6 +311,7 @@ def send_keepalive(send_info):
 
 ### main
 def main():
+    global client_info
     role = int(input("Zadaj 1 pre server: \nZadaj 2 pre clienta: \n3.Ukoncit\n:"))
     s_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     if role == 1:
@@ -354,6 +349,7 @@ def main():
         while True:
             choice = int(input('Chces byt stale client?'))
             if choice == 1:
+                client_info = ('192.168.1.15', 9000)
                 print("Server ide")
                 server_listen(send_info[0])
 
