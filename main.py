@@ -1,6 +1,5 @@
 import socket
 import os
-from time import perf_counter
 from struct import *
 import threading
 import time
@@ -25,7 +24,7 @@ def put_together(packet):
     all_packets.append(packet_in_right_form)
 
 
-def reconstruction_from_bytes():
+def reconstruction_file_from_bytes():
     global all_packets
     all_packets.sort(key=lambda all_packets: all_packets[2])
     file2 = open('img2.jpeg', 'wb')
@@ -36,8 +35,24 @@ def reconstruction_from_bytes():
         else:
             file2.write(packet[3])  # 3 because it's fourth part in packet and i need data
             last_packet += 1
-
+    all_packets = []
     file2.close()
+
+
+def reconstruction_message_from_bytes():
+    print('idem na rekonstrukciu filu')
+    global all_packets
+    all_packets.sort(key=lambda all_packets: all_packets[2])
+    last_packet = -1
+    for packet in all_packets:
+        if packet[2] == last_packet:
+            continue
+        else:
+            print('prijate packety', packet[3])
+            print(packet[3].decode())  # 3 because it's fourth part in packet and i need data
+            last_packet += 1
+
+    all_packets = []
 
 
 def control_crc(packet) -> int:
@@ -56,14 +71,14 @@ def analyze_packet(packet, s_socket):
         init_packet = pack('!c', 'I'.encode('ascii'))
         s_socket.sendto(init_packet, ('192.168.1.15', 5000))
 
-    elif type_of_packet == 'P':
-        s_socket.settimeout(15)
-        print('Je to porno')
-        print('oh Gott, schneller')
-        print(packet[1:])
-        return False
+    # elif type_of_packet == 'P':
+    #     s_socket.settimeout(15)
+    #     print('Je to porno')
+    #     print('oh Gott, schneller')
+    #     print(packet[1:])
+    #     return False
 
-    elif type_of_packet == 'M':
+    elif type_of_packet == 'M' or type_of_packet == 'P':
         s_socket.settimeout(15)
         # fist packet with information of file
         if number_packet_in_com == 0:
@@ -87,8 +102,10 @@ def analyze_packet(packet, s_socket):
 
             right_packet = pack('!c', 'O'.encode('ascii'))
             s_socket.sendto(right_packet, ('192.168.1.15', 5000))
-
-            reconstruction_from_bytes()
+            if type_of_packet == 'M':
+                reconstruction_file_from_bytes()
+            elif type_of_packet == 'P':
+                reconstruction_message_from_bytes()
             number_packet_in_com = 0
             return False
 
@@ -110,21 +127,31 @@ def analyze_packet(packet, s_socket):
 
 
 def server_listen(s_socket):
+    error_mising_packet = 3
+    counter_to_make_error = 0
     login = True
     while login:
         try:
             # if server is in middle sending process ignore keep alive, you need timeout for missing packets
             packet, address = s_socket.recvfrom(1500)
             type_of_packet = packet[0:1].decode('ascii')
+
+            #simulating thath packet is lost
+            # if error_mising_packet == counter_to_make_error:
+            #     continue
+
             if is_sending == True and type_of_packet == 'K':
                 pass
             else:
                 login = analyze_packet(packet, s_socket)
+                counter_to_make_error += 1
         except TimeoutError:
             s_socket.settimeout(15)
             if is_sending:
                 error_message = pack('!c', 'E'.encode('ascii'))
                 s_socket.sendto(error_message, ('192.168.1.15', 5000))
+                print('Reku, bol tu strateny packet')
+                continue
             print('Skoncil server')
             return
 
@@ -162,15 +189,70 @@ def create_crc(packet) -> list:
 
 
 def send_to_server(type_of_packet, send_info, add_error):
+    fragment_size = 512
+
     if type_of_packet == 'P':
         message = input("Zadaj spravu")
-        data = type_of_packet.encode('ascii') + message.encode()
-        data = create_crc(data)
-        send_info[0].sendto(data, (send_info[1], send_info[2]))
+        message = message.encode()
+        fragment_count = (len(message) // fragment_size) + 1
+
+
+        star_of_fragment = 0
+        end_of_fragment = fragment_size
+
+        header = 'P'.encode() + pack('!h', fragment_size) + pack('!h', fragment_count)
+        send_info[0].sendto(header, (send_info[1], send_info[2]))
+
+        for fragment_number in range(fragment_count):
+
+            data = message[star_of_fragment:end_of_fragment]
+
+            # if is message smaller than fragment size, is that size recount
+            if len(data) <= fragment_size:
+                fragment_size = len(data)
+
+            print('posielane packety', data)
+            header = 'P'.encode() + pack('!h', fragment_size) + pack('!h', fragment_number)
+            data = header + data
+            data = create_crc(data)
+
+            # add error
+            if fragment_number == 3 and add_error == 1:
+                data = bytearray(data)
+                corrupted_data = copy.deepcopy(data)
+                corrupted_data[2] = data[2] + 1
+                send_info[0].sendto(corrupted_data, (send_info[1], send_info[2]))
+            else:
+                send_info[0].sendto(data, (send_info[1], send_info[2]))
+
+            # waiting if packet is alright
+            while True:
+
+                try:
+                    send_info[0].settimeout(5)
+                    check_packet, address = send_info[0].recvfrom(1500)
+
+                except socket.timeout:
+                    print('Neprisiel acknolegment z {}. packetu'.format(fragment_number + 2))
+                    send_info[0].sendto(data, (send_info[1], send_info[2]))
+                    continue
+
+                # right packet continue, wrong send again
+
+                type_of_packet = check_packet[0:1].decode('ascii')
+                if type_of_packet == 'O':
+                    break
+
+                elif type_of_packet == 'E':
+                    print("Chyba bola v {} packetu".format(fragment_number))
+                    send_info[0].sendto(data, (send_info[1], send_info[2]))
+
+            star_of_fragment += fragment_size
+            end_of_fragment += fragment_size
+
 
     elif type_of_packet == 'M':
 
-        fragment_size = 512
         file = open('img.jpeg', 'rb')
         fragment_count = (os.path.getsize(
             'img.jpeg') // fragment_size) + 1  # add +1, because // round down, you need has more space
